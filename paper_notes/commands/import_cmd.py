@@ -14,6 +14,17 @@ from ..utils import (
 
 
 def cmd_import(args: argparse.Namespace) -> None:
+    sources = [s for s in [args.pdf, args.dir, args.batch] if s]
+    if len(sources) > 1:
+        print("错误: PDF、目录(-d)、清单(-b)三种方式不能同时使用")
+        print("提示: 只能选择一种导入方式")
+        return
+
+    if not args.pdf and not args.dir and not args.batch:
+        parser = args._parser
+        parser.print_help()
+        return
+
     db = Database()
     with db:
         if args.pdf:
@@ -22,9 +33,6 @@ def cmd_import(args: argparse.Namespace) -> None:
             _import_directory(db, args)
         elif args.batch:
             _import_batch(db, args)
-        else:
-            parser = args._parser
-            parser.print_help()
 
 
 def _import_single(db: Database, args: argparse.Namespace) -> None:
@@ -476,22 +484,37 @@ def register_import(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
         'import',
         help='导入 PDF 文件和手写摘要',
-        description='导入 PDF 文献文件和手写摘要文本到文献库'
+        description='导入 PDF 文献文件和手写摘要文本到文献库',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+使用示例:
+
+  # 单篇导入（PDF + 摘要）
+  paper-notes import paper.pdf -s summary.txt --tags "深度学习"
+
+  # 目录批量导入
+  paper-notes import -d ./pdfs/
+
+  # 清单批量导入
+  paper-notes import -b import_list.txt
+
+  # 从管道读取清单
+  cat list.txt | paper-notes import -b -
+        '''
     )
 
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument(
+    parser.add_argument(
         'pdf',
         nargs='?',
-        help='PDF 文件路径'
+        help='PDF 文件路径（单篇导入时使用）'
     )
-    group.add_argument(
+    parser.add_argument(
         '-d', '--dir',
         help='批量导入目录下的所有 PDF'
     )
-    group.add_argument(
+    parser.add_argument(
         '-b', '--batch',
-        help='批量导入（文件路径或 stdin，格式：标题|PDF路径|作者|年份|会议|标签(,分隔)|摘要文件路径；#开头的行忽略）'
+        help='批量导入清单文件（格式：标题|PDF路径|作者|年份|会议|标签(,分隔)|摘要文件路径；#开头的行忽略；使用 - 或 stdin 从管道读取）'
     )
 
     parser.add_argument(
