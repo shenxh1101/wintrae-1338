@@ -1,0 +1,23 @@
+# Attention Is All You Need
+
+作者: Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit
+年份: 2017
+会议/期刊: NeurIPS
+
+## 摘要
+本文提出了一种新的网络架构——Transformer，它完全基于自注意力机制，不使用循环神经网络。该架构在机器翻译任务上取得了优异的性能，同时训练并行性更好，训练时间更短。
+
+## 引用摘录
+- "We propose a new simple network architecture, the Transformer, based solely on attention mechanisms, dispensing with recurrence and convolutions entirely."
+- "Scaled Dot-Product Attention is defined as: Attention(Q,K,V) = softmax(QK^T/sqrt(d_k))V"
+- "The encoder is composed of a stack of N=6 identical layers."
+
+## 待解决问题
+- Multi-Head Attention 中为什么要分成多个头？单个头不行吗？
+- Position Encoding 的数学原理是什么？为什么选择正弦/余弦函数？
+- Transformer 相比 RNN 在长距离依赖建模上的优势具体体现在哪里？
+
+## 笔记
+- 这是 Transformer 架构的开山之作，后续 BERT、GPT 等都基于此
+- 核心创新点：自注意力、位置编码、多头注意力
+- 后续可以精读 Transformer-XL 和 GPT-1 等改进版本

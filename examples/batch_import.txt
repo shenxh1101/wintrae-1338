@@ -1,0 +1,5 @@
+Attention Is All You Need|./papers/transformer.pdf|Vaswani et al.|2017|NeurIPS|深度学习,NLP
+BERT: Pre-training of Deep Bidirectional Transformers|./papers/bert.pdf|Devlin et al.|2018|NAACL|深度学习,NLP
+Deep Residual Learning for Image Recognition|./papers/resnet.pdf|He et al.|2015|CVPR|深度学习,CV
+ImageNet Classification with Deep Convolutional Neural Networks|./papers/alexnet.pdf|Krizhevsky et al.|2012|NeurIPS|深度学习,CV
+Generative Adversarial Networks|./papers/gan.pdf|Goodfellow et al.|2014|NeurIPS|深度学习,生成模型
