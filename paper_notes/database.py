@@ -23,6 +23,19 @@ class Database:
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        self._migrate_schema()
+
+    def _migrate_schema(self) -> None:
+        cursor = self.conn.execute("PRAGMA table_info(papers)")
+        columns = [row['name'] for row in cursor.fetchall()]
+        if 'import_batch' not in columns:
+            self.conn.execute("ALTER TABLE papers ADD COLUMN import_batch TEXT")
+            self.conn.commit()
+        try:
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_papers_batch ON papers(import_batch)")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
 
     def close(self) -> None:
         if self.conn:
@@ -55,6 +68,7 @@ class Database:
                 summary_path TEXT,
                 reading_status TEXT DEFAULT 'unread',
                 reading_progress INTEGER DEFAULT 0,
+                import_batch TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 last_read_at TEXT
@@ -148,12 +162,13 @@ class Database:
 
     def add_paper(self, title: str, authors: Optional[str] = None,
                   year: Optional[int] = None, venue: Optional[str] = None,
-                  file_path: Optional[str] = None, summary_path: Optional[str] = None) -> int:
+                  file_path: Optional[str] = None, summary_path: Optional[str] = None,
+                  import_batch: Optional[str] = None) -> int:
         now = datetime.now().isoformat()
         cursor = self.conn.execute('''
-            INSERT INTO papers (title, authors, year, venue, file_path, summary_path, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (title, authors, year, venue, file_path, summary_path, now, now))
+            INSERT INTO papers (title, authors, year, venue, file_path, summary_path, import_batch, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (title, authors, year, venue, file_path, summary_path, import_batch, now, now))
         self.conn.commit()
         return cursor.lastrowid
 
@@ -303,7 +318,9 @@ class Database:
                       progress_max: Optional[int] = None,
                       author: Optional[str] = None,
                       year: Optional[int] = None,
-                      topic: Optional[str] = None) -> List[Dict[str, Any]]:
+                      topic: Optional[str] = None,
+                      batch: Optional[str] = None,
+                      recent_minutes: Optional[int] = None) -> List[Dict[str, Any]]:
         query = '''
             SELECT DISTINCT p.* FROM papers p
             LEFT JOIN paper_tags pt ON p.id = pt.paper_id
@@ -345,6 +362,13 @@ class Database:
         if topic:
             query += ' AND t.name = ? AND t.category = ?'
             params.extend([topic, 'topic'])
+
+        if batch:
+            query += ' AND p.import_batch = ?'
+            params.append(batch)
+
+        if recent_minutes is not None:
+            query += f" AND julianday('now') - julianday(p.created_at) <= {float(recent_minutes) / 1440.0}"
 
         query += ' ORDER BY p.updated_at DESC'
 
@@ -396,4 +420,31 @@ class Database:
             FROM papers
             GROUP BY reading_status
         ''')
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_papers_by_batch(self, batch_id: str) -> List[Dict[str, Any]]:
+        cursor = self.conn.execute(
+            'SELECT * FROM papers WHERE import_batch = ? ORDER BY id ASC',
+            (batch_id,)
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_latest_batches(self, limit: int = 10) -> List[Dict[str, Any]]:
+        cursor = self.conn.execute(f'''
+            SELECT import_batch as batch, 
+                   COUNT(*) as count,
+                   MAX(created_at) as latest_at
+            FROM papers 
+            WHERE import_batch IS NOT NULL 
+            GROUP BY import_batch 
+            ORDER BY latest_at DESC 
+            LIMIT {limit}
+        ''')
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_papers_by_created_after(self, iso_timestamp: str) -> List[Dict[str, Any]]:
+        cursor = self.conn.execute(
+            'SELECT * FROM papers WHERE created_at >= ? ORDER BY created_at ASC',
+            (iso_timestamp,)
+        )
         return [dict(row) for row in cursor.fetchall()]

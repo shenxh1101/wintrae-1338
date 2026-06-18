@@ -5,6 +5,7 @@ from .search_cmd import cmd_search, register_search
 from .export_cmd import cmd_export, register_export
 from .stats_cmd import cmd_stats, register_stats
 from .note_cmd import cmd_note, register_note
+from .doctor_cmd import cmd_doctor, register_doctor
 
 __all__ = [
     'cmd_init',
@@ -21,4 +22,6 @@ __all__ = [
     'register_stats',
     'cmd_note',
     'register_note',
+    'cmd_doctor',
+    'register_doctor',
 ]

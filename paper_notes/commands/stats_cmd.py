@@ -22,6 +22,8 @@ def cmd_stats(args: argparse.Namespace) -> None:
             _show_stale_papers(db, args)
         elif args.status:
             _show_status_distribution(db, args)
+        elif args.batches:
+            _show_batch_stats(db, args)
         else:
             _show_overview(db, args)
 
@@ -259,6 +261,33 @@ def _show_status_distribution(db: Database, args: argparse.Namespace) -> None:
         print("  没有正在阅读的文献")
 
 
+def _show_batch_stats(db: Database, args: argparse.Namespace) -> None:
+    batches = db.get_latest_batches(limit=50)
+
+    print("=" * 60)
+    print("[#] 导入批次统计")
+    print("=" * 60)
+    print()
+
+    if not batches:
+        print("暂无批量导入记录（使用 paper-notes import -b 清单后会在此显示）")
+        print()
+        return
+
+    print(f"共 {len(batches)} 个批次，最近 10 个:")
+    print()
+
+    for i, b in enumerate(batches[:10], 1):
+        ts = (b.get('latest_at') or '').replace('T', ' ')[:19]
+        print(f"  {i:2d}. {b['batch']:<25} {b['count']:>3} 篇  {ts}")
+
+    print()
+    print("[?] 查看某个批次的文献:")
+    if batches:
+        print(f"    paper-notes search --batch {batches[0]['batch']}")
+    print()
+
+
 def register_stats(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
         'stats',
@@ -286,6 +315,11 @@ def register_stats(subparsers: argparse._SubParsersAction) -> None:
         '--status',
         action='store_true',
         help='查看阅读状态分布'
+    )
+    group.add_argument(
+        '--batches',
+        action='store_true',
+        help='查看导入批次统计'
     )
 
     parser.add_argument(

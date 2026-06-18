@@ -1,7 +1,9 @@
 import os
+import csv
 import glob
 import argparse
-from typing import List, Dict, Any
+from datetime import datetime
+from typing import List, Dict, Any, Tuple, Optional
 from ..database import Database
 from ..utils import (
     parse_pdf_filename,
@@ -13,7 +15,143 @@ from ..utils import (
 )
 
 
+def _print_batch_help() -> None:
+    print("=" * 60)
+    print("批量导入清单格式说明")
+    print("=" * 60)
+    print()
+    print("支持以下 3 种格式（根据文件内容自动识别）:")
+    print()
+    print("1. 竖线分隔（默认，与旧版本兼容）:")
+    print("   格式: 标题|PDF路径|作者|年份|会议|主题标签(逗号分隔)|摘要文件路径")
+    print("   示例: Deep Learning Paper|./paper.pdf|John Doe|2023|ICML|深度学习,CV|./summary.txt")
+    print("   说明: 字段可留空，# 开头的行为注释")
+    print()
+    print("2. CSV（首行为表头，字段名需包含: title,pdf,authors,year,tags,summary,venue）:")
+    print('   title,pdf,authors,year,tags,venue,summary')
+    print('   "Paper Title",./paper.pdf,"John Doe, Jane",2023,"CV,深度学习",ICML,./sum.txt')
+    print()
+    print("3. TSV（Tab 分隔，首行为表头，字段名同上）:")
+    print("   title\tpdf\tauthors\tyear\ttags\tvenue\tsummary")
+    print("   Paper\t./paper.pdf\tJohn\t2023\tCV\tICML\t./sum.txt")
+    print()
+    print("公共字段说明:")
+    print("  title    - 论文标题（必填）")
+    print("  pdf      - PDF 文件路径（可选，不存在会警告）")
+    print("  authors  - 作者列表（可选，逗号分隔多作者）")
+    print("  year     - 出版年份（可选，整数）")
+    print("  venue    - 会议/期刊（可选）")
+    print("  tags     - 主题标签（可选，逗号分隔多个标签）")
+    print("  summary  - 摘要文件路径（可选）")
+    print()
+    print("用法:")
+    print("  paper-notes import -b import_list.txt")
+    print("  cat list.txt | paper-notes import -b stdin")
+    print("  cat list.csv | paper-notes import -b -")
+    print()
+
+
+def _detect_and_parse(content_lines: List[str]) -> Tuple[str, List[Dict[str, str]]]:
+    if not content_lines:
+        return 'empty', []
+
+    first = content_lines[0].strip()
+    if not first:
+        return 'empty', []
+
+    def _normalize(h: str) -> str:
+        return h.strip().lower().replace(' ', '_').replace('-', '_')
+
+    headers_norm = [_normalize(x) for x in [
+        'title', 'pdf', 'authors', 'author', 'year', 'venue',
+        'tags', 'tag', 'summary', 'conference', 'journal'
+    ]]
+
+    field_map = {
+        'author': 'authors',
+        'tag': 'tags',
+        'conference': 'venue',
+        'journal': 'venue',
+    }
+
+    has_csv_header = False
+    has_tsv_header = False
+
+    if '\t' in first:
+        cols = [c.strip() for c in first.split('\t')]
+        norm = [_normalize(c) for c in cols]
+        if 'title' in norm and ('pdf' in norm or 'file' in norm or 'path' in norm):
+            has_tsv_header = True
+    elif ',' in first:
+        try:
+            cols = next(csv.reader([first]))
+            cols = [c.strip() for c in cols]
+            norm = [_normalize(c) for c in cols]
+            if 'title' in norm and ('pdf' in norm or 'file' in norm or 'path' in norm):
+                has_csv_header = True
+        except Exception:
+            pass
+
+    def _remap(cols: List[str], values: List[str]) -> Dict[str, str]:
+        row = {}
+        for c, v in zip(cols, values):
+            key = _normalize(c)
+            key = field_map.get(key, key)
+            if key in ['title', 'pdf', 'authors', 'year', 'venue', 'tags', 'summary']:
+                row[key] = v.strip() if isinstance(v, str) else v
+        return row
+
+    if has_csv_header:
+        cols = next(csv.reader([first]))
+        cols = [c.strip() for c in cols]
+        rows = []
+        for line in content_lines[1:]:
+            if not line.strip():
+                continue
+            try:
+                values = next(csv.reader([line]))
+            except Exception:
+                continue
+            rows.append(_remap(cols, values))
+        return 'csv', rows
+
+    if has_tsv_header:
+        cols = [c.strip() for c in first.split('\t')]
+        rows = []
+        for line in content_lines[1:]:
+            if not line.strip():
+                continue
+            values = [v.strip() for v in line.split('\t')]
+            rows.append(_remap(cols, values))
+        return 'tsv', rows
+
+    rows = []
+    for line in content_lines:
+        parts = [p.strip() for p in line.split('|')]
+        while len(parts) < 7:
+            parts.append('')
+        row = {
+            'title': parts[0],
+            'pdf': parts[1],
+            'authors': parts[2],
+            'year': parts[3],
+            'venue': parts[4],
+            'tags': parts[5],
+            'summary': parts[6],
+        }
+        rows.append(row)
+    return 'pipe', rows
+
+
+def _generate_batch_id() -> str:
+    return datetime.now().strftime('batch_%Y%m%d_%H%M%S')
+
+
 def cmd_import(args: argparse.Namespace) -> None:
+    if args.batch == '__SHOW_HELP__':
+        _print_batch_help()
+        return
+
     sources = [s for s in [args.pdf, args.dir, args.batch] if s]
     if len(sources) > 1:
         print("错误: PDF、目录(-d)、清单(-b)三种方式不能同时使用")
@@ -226,7 +364,7 @@ def _import_directory(db: Database, args: argparse.Namespace) -> None:
 def _import_batch(db: Database, args: argparse.Namespace) -> None:
     batch_arg = args.batch
     use_stdin = False
-    lines = []
+    raw_lines = []
 
     if batch_arg == '-' or batch_arg == 'stdin':
         use_stdin = True
@@ -235,13 +373,8 @@ def _import_batch(db: Database, args: argparse.Namespace) -> None:
         if not os.path.exists(batch_file):
             print(f"错误: 批量导入清单不存在: {batch_file}")
             print()
-            print("清单格式示例（每行一篇，字段用 | 分隔）:")
-            print("  标题|PDF路径|作者|年份|会议|主题标签(逗号分隔)|摘要文件路径")
-            print()
-            print("提示:")
-            print("  - PDF路径、摘要文件路径不存在时会跳过该文件（但文献记录仍会创建）")
-            print("  - 字段可留空（如：标题||作者|年份||标签|摘要.txt）")
-            print("  - 使用 -b stdin 从管道读取: cat list.txt | paper-notes import -b stdin")
+            print("使用 'paper-notes import -b' 查看支持的清单格式")
+            print("使用 'paper-notes import --help' 查看所有用法")
             return
 
         if not os.path.isfile(batch_file):
@@ -249,8 +382,8 @@ def _import_batch(db: Database, args: argparse.Namespace) -> None:
             return
 
         try:
-            with open(batch_file, 'r', encoding='utf-8') as f:
-                lines = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+            with open(batch_file, 'r', encoding='utf-8-sig') as f:
+                raw_lines = [line.rstrip('\n').rstrip('\r') for line in f]
         except UnicodeDecodeError:
             print(f"错误: 无法读取文件编码，请使用 UTF-8 编码保存: {batch_file}")
             return
@@ -264,20 +397,30 @@ def _import_batch(db: Database, args: argparse.Namespace) -> None:
             print("错误: 未从管道获取输入且清单文件不存在")
             print("  用法1: paper-notes import -b import_list.txt")
             print("  用法2: cat import_list.txt | paper-notes import -b stdin")
+            print("  用法3: paper-notes import -b   # 查看格式说明")
             return
-        lines = [line.strip() for line in sys.stdin if line.strip() and not line.startswith('#')]
+        raw_lines = [line.rstrip('\n').rstrip('\r') for line in sys.stdin]
 
-    if not lines:
+    content_lines = [ln for ln in raw_lines if ln.strip() and not ln.strip().startswith('#')]
+
+    if not content_lines:
         print("错误: 导入清单为空，没有任何数据行")
         return
 
+    format_name, rows = _detect_and_parse(content_lines)
+
+    batch_id = _generate_batch_id()
+
     print("=" * 60)
-    print(f"批量导入 {len(lines)} 篇文献")
+    print(f"批量导入 {len(rows)} 条记录")
     if not use_stdin:
         print(f"来源: {batch_file}")
+    print(f"批次号: {batch_id}")
+    fmt_label = {'csv': 'CSV (带表头)', 'tsv': 'TSV (带表头)', 'pipe': '竖线分隔'}.get(format_name, format_name)
+    print(f"格式识别: {fmt_label}")
     print("=" * 60)
     print()
-    print("格式说明: 标题 | PDF路径 | 作者 | 年份 | 会议 | 主题标签(,) | 摘要路径")
+    print("字段: title | pdf | authors | year | venue | tags | summary")
     print("-" * 60)
     print()
 
@@ -285,25 +428,22 @@ def _import_batch(db: Database, args: argparse.Namespace) -> None:
     skip_list = []
     fail_list = []
 
-    for idx, line in enumerate(lines, 1):
-        parts = [p.strip() for p in line.split('|')]
-
-        while len(parts) < 7:
-            parts.append('')
-
-        title = parts[0]
-        pdf_path = parts[1]
-        authors = parts[2] if parts[2] else None
-        year = int(parts[3]) if parts[3].isdigit() else None
-        venue = parts[4] if parts[4] else None
-        tags_str = parts[5]
-        summary_path = parts[6] if parts[6] else None
+    for idx, row in enumerate(rows, 1):
+        title = (row.get('title') or '').strip()
+        pdf_path = (row.get('pdf') or '').strip()
+        authors_raw = (row.get('authors') or '').strip()
+        authors = authors_raw if authors_raw else None
+        year_str = (row.get('year') or '').strip()
+        year = int(year_str) if year_str and year_str.isdigit() else None
+        venue = (row.get('venue') or '').strip() or None
+        tags_str = (row.get('tags') or '').strip()
+        summary_path = (row.get('summary') or '').strip() or None
 
         if not title:
             msg = f"第 {idx} 行缺少标题字段"
-            fail_list.append({'line': idx, 'raw': line, 'reason': msg})
+            fail_list.append({'line': idx, 'raw': '|'.join([row.get(k, '') for k in ['title', 'pdf', 'authors', 'year', 'venue', 'tags', 'summary']]), 'reason': msg})
             print(f"[FAIL] 第{idx}行: {msg}")
-            print(f"        原始内容: {line[:60]}...")
+            print(f"        原始内容: {str(row)[:60]}...")
             continue
 
         existing = db.get_paper_by_title(title)
@@ -366,7 +506,8 @@ def _import_batch(db: Database, args: argparse.Namespace) -> None:
                     year=year,
                     venue=venue,
                     file_path=dst_pdf_path,
-                    summary_path=dst_summary_path
+                    summary_path=dst_summary_path,
+                    import_batch=batch_id
                 )
                 status_label = "[UPD]"
             else:
@@ -376,7 +517,8 @@ def _import_batch(db: Database, args: argparse.Namespace) -> None:
                     year=year,
                     venue=venue,
                     file_path=dst_pdf_path,
-                    summary_path=dst_summary_path
+                    summary_path=dst_summary_path,
+                    import_batch=batch_id
                 )
                 status_label = "[ OK ]"
         except Exception as e:
@@ -440,10 +582,11 @@ def _import_batch(db: Database, args: argparse.Namespace) -> None:
     print("=" * 60)
     print("批量导入汇总报告")
     print("=" * 60)
-    total = len(lines)
+    total = len(rows)
     ok = len(success_list)
     skip = len(skip_list)
     fail = len(fail_list)
+    print(f"批次号: {batch_id}")
     print(f"总行数: {total}")
     print(f"成功:   {ok}   ({ok/total*100:.1f}%)")
     print(f"跳过:   {skip}   ({skip/total*100:.1f}%)")
@@ -456,6 +599,9 @@ def _import_batch(db: Database, args: argparse.Namespace) -> None:
         print(f"  新增: {new_count} 篇")
         if updated_count:
             print(f"  更新: {updated_count} 篇")
+        print()
+        print(f"查看本批次: paper-notes search --batch {batch_id}")
+        print(f"查看所有批次: paper-notes stats --batches")
 
     if skip_list:
         print()
@@ -471,7 +617,6 @@ def _import_batch(db: Database, args: argparse.Namespace) -> None:
             title = f.get('title', f"原始行: {f.get('raw','')[:50]}")
             print(f"  第{f['line']}行 - {title}")
             print(f"    原因: {f['reason']}")
-            fail_count = fail
 
     print()
     if fail > 0:
@@ -514,7 +659,10 @@ def register_import(subparsers: argparse._SubParsersAction) -> None:
     )
     parser.add_argument(
         '-b', '--batch',
-        help='批量导入清单文件（格式：标题|PDF路径|作者|年份|会议|标签(,分隔)|摘要文件路径；#开头的行忽略；使用 - 或 stdin 从管道读取）'
+        nargs='?',
+        const='__SHOW_HELP__',
+        metavar='FILE',
+        help='批量导入清单文件（支持竖线分隔、CSV、TSV）。不带参数时显示格式说明。支持 - 或 stdin 从管道读取。'
     )
 
     parser.add_argument(

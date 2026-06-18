@@ -21,22 +21,37 @@ def cmd_search(args: argparse.Namespace) -> None:
 
 
 def _search_papers(db: Database, args: argparse.Namespace) -> None:
-    papers = db.search_papers(
-        keyword=args.keyword,
-        tags=args.tag,
-        status=args.status,
-        progress_min=args.progress_min,
-        progress_max=args.progress_max,
-        author=args.author,
-        year=args.year,
-        topic=args.topic
-    )
+    if args.batch:
+        papers = db.get_papers_by_batch(args.batch)
+    elif args.recent is not None:
+        papers = db.search_papers(recent_minutes=args.recent)
+    else:
+        papers = db.search_papers(
+            keyword=args.keyword,
+            tags=args.tag,
+            status=args.status,
+            progress_min=args.progress_min,
+            progress_max=args.progress_max,
+            author=args.author,
+            year=args.year,
+            topic=args.topic
+        )
 
     if not papers:
-        print("未找到符合条件的文献")
+        if args.batch:
+            print(f"未找到批次 {args.batch} 的文献")
+        elif args.recent is not None:
+            print(f"最近 {args.recent} 分钟内没有导入的文献")
+        else:
+            print("未找到符合条件的文献")
         return
 
-    print(f"找到 {len(papers)} 篇符合条件的文献:\n")
+    if args.batch:
+        print(f"批次 {args.batch} 共 {len(papers)} 篇文献:\n")
+    elif args.recent is not None:
+        print(f"最近 {args.recent} 分钟导入的 {len(papers)} 篇文献:\n")
+    else:
+        print(f"找到 {len(papers)} 篇符合条件的文献:\n")
     print_paper_list(papers, show_tags=args.show_tags, db=db)
 
     if args.count:
@@ -213,6 +228,17 @@ def register_search(subparsers: argparse._SubParsersAction) -> None:
         '--progress-max',
         type=int,
         help='最高阅读进度 (0-100)'
+    )
+    filter_group.add_argument(
+        '--batch',
+        metavar='BATCH_ID',
+        help='按导入批次筛选，如 batch_20250619_101530'
+    )
+    filter_group.add_argument(
+        '--recent',
+        type=int,
+        metavar='MINUTES',
+        help='只显示最近 N 分钟内导入的文献'
     )
 
     output_group = parser.add_argument_group('输出选项')
