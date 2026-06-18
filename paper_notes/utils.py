@@ -229,7 +229,7 @@ def print_progress_bar(value: int, max_value: int = 100, width: int = 30) -> str
         max_value = 100
     ratio = min(max(value / max_value, 0), 1)
     filled = int(ratio * width)
-    bar = '█' * filled + '░' * (width - filled)
+    bar = '#' * filled + '-' * (width - filled)
     percent = int(ratio * 100)
     return f"{bar} {percent}%"
 

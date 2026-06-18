@@ -20,6 +20,8 @@ def cmd_export(args: argparse.Namespace) -> None:
             _export_quotes(db, args)
         elif args.type == 'questions':
             _export_questions(db, args)
+        elif args.type == 'meeting':
+            _export_meeting(db, args)
         elif args.type == 'all':
             _export_all(db, args)
         else:
@@ -69,8 +71,28 @@ def _get_target_papers(db: Database, args: argparse.Namespace) -> List[Dict[str,
     return db.get_all_papers()
 
 
+def _papers_by_topic_from_list(db: Database, papers: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    result = defaultdict(list)
+    uncategorized = []
+
+    for paper in papers:
+        tags = db.get_paper_tags(paper['id'])
+        paper_topics = [t['name'] for t in tags if t['category'] == 'topic']
+        if paper_topics:
+            for topic in paper_topics:
+                result[topic].append(paper)
+        else:
+            uncategorized.append(paper)
+
+    if uncategorized:
+        result['未分类'] = uncategorized
+
+    return result
+
+
 def _export_reading_list(db: Database, args: argparse.Namespace) -> None:
-    papers_by_topic = _get_papers_by_topic(db)
+    papers = _get_target_papers(db, args)
+    papers_by_topic = _papers_by_topic_from_list(db, papers)
     papers_by_topic = dict(sorted(papers_by_topic.items()))
 
     output_lines = []
@@ -233,6 +255,155 @@ def _export_questions(db: Database, args: argparse.Namespace) -> None:
     print(f"[OK] 已导出 {len(all_questions)} 个待办问题")
 
 
+def _get_summary_note(db: Database, paper_id: int) -> str:
+    notes = db.get_paper_notes(paper_id)
+    summary_notes = [n for n in notes if n['note_type'] == 'summary']
+    if summary_notes:
+        return summary_notes[0]['content']
+    general_notes = [n for n in notes if n['note_type'] in ('general', 'conclusion', 'result')]
+    if general_notes:
+        return general_notes[0]['content']
+    return '(暂无摘要，可用 note --summary 添加)'
+
+
+def _export_meeting(db: Database, args: argparse.Namespace) -> None:
+    output_lines = []
+
+    title = getattr(args, 'meeting_title', None) or '组会阅读报告'
+    output_lines.append(f"# {title}")
+    output_lines.append(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    output_lines.append("")
+
+    papers = _get_target_papers(db, args)
+
+    if getattr(args, 'status', None):
+        papers = [p for p in papers if p['reading_status'] == getattr(args, 'status')]
+
+    if getattr(args, 'topic', None):
+        topic = args.topic
+        tagged_ids = set(p['id'] for p in db.get_papers_by_tag(topic))
+        papers = [p for p in papers if p['id'] in tagged_ids]
+
+    if not papers:
+        output_lines.append("没有符合筛选条件的文献")
+        _write_output(output_lines, args.output, args.format)
+        print("[OK] 组会汇总（无数据）")
+        return
+
+    papers_by_topic = defaultdict(list)
+    uncategorized = []
+    for paper in papers:
+        tags = db.get_paper_tags(paper['id'])
+        topics = [t['name'] for t in tags if t['category'] == 'topic']
+        if topics:
+            for topic in topics:
+                papers_by_topic[topic].append(paper)
+        else:
+            uncategorized.append(paper)
+    if uncategorized:
+        papers_by_topic['未分类'] = uncategorized
+
+    total_papers = len(papers)
+    total_questions = 0
+    total_to_review = 0
+
+    output_lines.append(f"**总览**")
+    output_lines.append(f"- 文献总数: {total_papers} 篇")
+    output_lines.append(f"- 涉及主题: {len(papers_by_topic)} 个")
+    output_lines.append("")
+
+    for paper in papers:
+        if paper['reading_status'] == 'to_review':
+            total_to_review += 1
+        questions = db.get_paper_questions(paper['id'], 'pending')
+        total_questions += len(questions)
+
+    output_lines.append(f"- 待精读: {total_to_review} 篇")
+    output_lines.append(f"- 未解决问题: {total_questions} 个")
+    output_lines.append("")
+
+    output_lines.append("---")
+    output_lines.append("")
+
+    output_lines.append("## 一、按主题阅读摘要")
+    output_lines.append("")
+
+    sorted_topics = sorted(papers_by_topic.keys())
+    for topic in sorted_topics:
+        topic_papers = papers_by_topic[topic]
+        output_lines.append(f"### {topic}（{len(topic_papers)} 篇）")
+        output_lines.append("")
+
+        for i, paper in enumerate(topic_papers, 1):
+            paper_id = paper['id']
+            summary = _get_summary_note(db, paper_id)
+            status = format_status(paper['reading_status'])
+            authors = paper['authors'] or ''
+            year = paper['year'] and f"({paper['year']})" or ''
+            output_lines.append(f"**{i}. {paper['title']}**")
+            meta_parts = []
+            if authors:
+                meta_parts.append(authors)
+            if year:
+                meta_parts.append(str(year))
+            if paper['venue']:
+                meta_parts.append(paper['venue'])
+            if meta_parts:
+                output_lines.append(f"*{', '.join(meta_parts)}*")
+            output_lines.append(f"- **阅读状态**: {status} | **进度**: {paper['reading_progress']}%")
+            output_lines.append(f"- **一句话摘要**: {summary}")
+            output_lines.append("")
+
+        output_lines.append("")
+
+    output_lines.append("## 二、待精读清单")
+    output_lines.append("")
+
+    to_review_papers = [p for p in papers if p['reading_status'] == 'to_review']
+    if to_review_papers:
+        for i, paper in enumerate(to_review_papers, 1):
+            summary = _get_summary_note(db, paper['id'])
+            output_lines.append(f"{i}. **{paper['title']}**")
+            authors = paper['authors'] or ''
+            year = paper['year'] and f" ({paper['year']})" or ''
+            if paper['authors'] or paper['year']:
+                output_lines.append(f"   *{authors}{year}*")
+            output_lines.append(f"   原因/计划: {summary}")
+            output_lines.append("")
+    else:
+        output_lines.append("_暂无待精读文献，继续保持！")
+        output_lines.append("")
+
+    output_lines.append("## 三、未解决问题汇总")
+    output_lines.append("")
+
+    all_pending = []
+    for paper in papers:
+        questions = db.get_paper_questions(paper['id'], 'pending')
+        for q in questions:
+            all_pending.append((paper, q))
+
+    if all_pending:
+        for i, (paper, q) in enumerate(all_pending, 1):
+            output_lines.append(f"{i}. **{q['content']}**")
+            output_lines.append(f"   文献: {paper['title']}")
+            if paper['authors']:
+                output_lines.append(f"   作者: {paper['authors']}")
+            output_lines.append(f"   创建: {format_date(q['created_at'])}")
+            output_lines.append("")
+    else:
+        output_lines.append("_太棒了！没有未解决的问题_")
+        output_lines.append("")
+
+    output_lines.append("---")
+    output_lines.append("")
+    output_lines.append(f"_本报告由 paper-notes 工具自动生成_")
+
+    _write_output(output_lines, args.output, args.format)
+    print(f"[OK] 组会汇总报告已生成")
+    print(f"     文献: {total_papers} 篇 | 待精读: {total_to_review} 篇 | 问题: {total_questions} 个")
+
+
 def _export_all(db: Database, args: argparse.Namespace) -> None:
     base_name = os.path.splitext(args.output)[0] if args.output else 'export'
 
@@ -281,9 +452,9 @@ def register_export(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument(
         'type',
         nargs='?',
-        choices=['list', 'quotes', 'questions', 'all'],
+        choices=['list', 'quotes', 'questions', 'meeting', 'all'],
         default='list',
-        help='导出类型: list(阅读清单), quotes(引用摘录), questions(待办问题), all(全部)'
+        help='导出类型: list(阅读清单), quotes(引用摘录), questions(待办问题), meeting(组会汇总), all(全部)'
     )
 
     filter_group = parser.add_argument_group('筛选条件')
@@ -293,12 +464,12 @@ def register_export(subparsers: argparse._SubParsersAction) -> None:
     )
     filter_group.add_argument(
         '--topic',
-        help='按主题筛选'
+        help='按主题筛选（组会汇总、阅读清单支持）'
     )
     filter_group.add_argument(
         '--status',
         choices=['unread', 'reading', 'read', 'to_review'],
-        help='按阅读状态筛选'
+        help='按阅读状态筛选（组会汇总、阅读清单、引用摘录支持）'
     )
     filter_group.add_argument(
         '--question-status',
@@ -322,6 +493,13 @@ def register_export(subparsers: argparse._SubParsersAction) -> None:
         '--group-by-paper',
         action='store_true',
         help='按文献分组显示（仅引用摘录导出）'
+    )
+
+    meeting_group = parser.add_argument_group('组会汇总选项')
+    meeting_group.add_argument(
+        '--meeting-title',
+        default='组会阅读报告',
+        help='组会汇总报告的标题（默认：组会阅读报告）'
     )
 
     parser.set_defaults(func=cmd_export, _parser=parser)

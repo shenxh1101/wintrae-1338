@@ -14,6 +14,7 @@ from .commands import (
     register_search,
     register_export,
     register_stats,
+    register_note,
 )
 
 
@@ -28,23 +29,18 @@ def create_parser() -> argparse.ArgumentParser:
   # 初始化文献库
   paper-notes init ./my_papers
 
-  # 导入单篇论文
-  paper-notes import ./my_papers paper.pdf -s summary.txt --tags "深度学习" "NLP"
+  # 批量导入清单（支持 PDF、摘要、标签）
+  paper-notes import -b import_list.txt
 
-  # 批量导入目录
-  paper-notes import --dir ./downloads
+  # 追加摘录、问题、笔记
+  paper-notes note --ids 1 -q "引用的原文内容" -p 15
+  paper-notes note --ids 1,2 --question "这个问题怎么解决？"
+  paper-notes note --ids 1 -s "一句话摘要：本文提出了..."
+  paper-notes note --ids 1 --from-file new_summary.txt
 
-  # 添加标签
-  paper-notes tag --ids 1,2,3 --add "深度学习"
-
-  # 标记已读
-  paper-notes tag --ids 1 --read
-
-  # 搜索文献
-  paper-notes search "transformer" --tags "深度学习"
-
-  # 导出阅读清单
-  paper-notes export list -o reading_list.md
+  # 组会汇总导出
+  paper-notes export meeting -o meeting_report.md --topic "深度学习"
+  paper-notes export meeting -o weekly.md --status to_review
 
   # 查看统计
   paper-notes stats
@@ -68,6 +64,7 @@ def create_parser() -> argparse.ArgumentParser:
     register_init(subparsers)
     register_import(subparsers)
     register_tag(subparsers)
+    register_note(subparsers)
     register_search(subparsers)
     register_export(subparsers)
     register_stats(subparsers)

@@ -16,7 +16,7 @@ from ..utils import (
 def cmd_import(args: argparse.Namespace) -> None:
     db = Database()
     with db:
-        if args.summary and args.pdf:
+        if args.pdf:
             _import_single(db, args)
         elif args.dir:
             _import_directory(db, args)
@@ -216,61 +216,260 @@ def _import_directory(db: Database, args: argparse.Namespace) -> None:
 
 
 def _import_batch(db: Database, args: argparse.Namespace) -> None:
-    batch_file = os.path.abspath(args.batch)
+    batch_arg = args.batch
+    use_stdin = False
+    lines = []
 
-    if not os.path.exists(batch_file):
-        with open(batch_file, 'r', encoding='utf-8') as f:
-            lines = [line.strip() for line in f if line.strip()]
+    if batch_arg == '-' or batch_arg == 'stdin':
+        use_stdin = True
     else:
+        batch_file = os.path.abspath(batch_arg)
+        if not os.path.exists(batch_file):
+            print(f"错误: 批量导入清单不存在: {batch_file}")
+            print()
+            print("清单格式示例（每行一篇，字段用 | 分隔）:")
+            print("  标题|PDF路径|作者|年份|会议|主题标签(逗号分隔)|摘要文件路径")
+            print()
+            print("提示:")
+            print("  - PDF路径、摘要文件路径不存在时会跳过该文件（但文献记录仍会创建）")
+            print("  - 字段可留空（如：标题||作者|年份||标签|摘要.txt）")
+            print("  - 使用 -b stdin 从管道读取: cat list.txt | paper-notes import -b stdin")
+            return
+
+        if not os.path.isfile(batch_file):
+            print(f"错误: {batch_file} 不是一个文件")
+            return
+
+        try:
+            with open(batch_file, 'r', encoding='utf-8') as f:
+                lines = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+        except UnicodeDecodeError:
+            print(f"错误: 无法读取文件编码，请使用 UTF-8 编码保存: {batch_file}")
+            return
+        except Exception as e:
+            print(f"错误: 读取文件失败: {e}")
+            return
+
+    if use_stdin:
         import sys
-        lines = [line.strip() for line in sys.stdin if line.strip()]
+        if sys.stdin.isatty():
+            print("错误: 未从管道获取输入且清单文件不存在")
+            print("  用法1: paper-notes import -b import_list.txt")
+            print("  用法2: cat import_list.txt | paper-notes import -b stdin")
+            return
+        lines = [line.strip() for line in sys.stdin if line.strip() and not line.startswith('#')]
 
     if not lines:
-        print("错误: 没有提供导入列表")
+        print("错误: 导入清单为空，没有任何数据行")
         return
 
-    print(f"批量导入 {len(lines)} 篇文献...")
+    print("=" * 60)
+    print(f"批量导入 {len(lines)} 篇文献")
+    if not use_stdin:
+        print(f"来源: {batch_file}")
+    print("=" * 60)
+    print()
+    print("格式说明: 标题 | PDF路径 | 作者 | 年份 | 会议 | 主题标签(,) | 摘要路径")
+    print("-" * 60)
     print()
 
-    imported = []
+    success_list = []
+    skip_list = []
+    fail_list = []
 
-    for line in lines:
-        parts = line.split('|')
-        if len(parts) < 2:
-            print(f"跳过格式错误的行: {line}")
+    for idx, line in enumerate(lines, 1):
+        parts = [p.strip() for p in line.split('|')]
+
+        while len(parts) < 7:
+            parts.append('')
+
+        title = parts[0]
+        pdf_path = parts[1]
+        authors = parts[2] if parts[2] else None
+        year = int(parts[3]) if parts[3].isdigit() else None
+        venue = parts[4] if parts[4] else None
+        tags_str = parts[5]
+        summary_path = parts[6] if parts[6] else None
+
+        if not title:
+            msg = f"第 {idx} 行缺少标题字段"
+            fail_list.append({'line': idx, 'raw': line, 'reason': msg})
+            print(f"[FAIL] 第{idx}行: {msg}")
+            print(f"        原始内容: {line[:60]}...")
             continue
 
-        title = parts[0].strip()
-        pdf_path = parts[1].strip() if len(parts) > 1 else None
-        authors = parts[2].strip() if len(parts) > 2 else None
-        year = int(parts[3].strip()) if len(parts) > 3 and parts[3].strip().isdigit() else None
-        venue = parts[4].strip() if len(parts) > 4 else None
-        tags = parts[5].strip() if len(parts) > 5 else None
+        existing = db.get_paper_by_title(title)
+        if existing and not args.force:
+            msg = f"标题已存在 (ID={existing['id']})"
+            skip_list.append({'line': idx, 'title': title, 'reason': msg})
+            print(f"[SKIP] 第{idx}行: {title}")
+            print(f"        原因: {msg}，使用 -f 可更新")
+            continue
 
+        pdf_warnings = []
         dst_pdf_path = None
-        if pdf_path and os.path.exists(pdf_path) and pdf_path.lower().endswith('.pdf'):
-            dst_pdf_path = copy_file_to_dir(pdf_path, db.papers_dir, args.force)
+        if pdf_path:
+            abs_pdf = os.path.abspath(pdf_path)
+            if not os.path.exists(abs_pdf):
+                pdf_warnings.append(f"PDF不存在: {pdf_path}")
+            elif not abs_pdf.lower().endswith('.pdf'):
+                pdf_warnings.append(f"不是PDF文件: {pdf_path}")
+            else:
+                try:
+                    dst_pdf_path = copy_file_to_dir(abs_pdf, db.papers_dir, args.force)
+                except Exception as e:
+                    pdf_warnings.append(f"复制PDF失败: {e}")
 
-        paper_id = db.add_paper(
-            title=title,
-            authors=authors,
-            year=year,
-            venue=venue,
-            file_path=dst_pdf_path
-        )
+        dst_summary_path = None
+        summary_data = {}
+        if summary_path:
+            abs_summary = os.path.abspath(summary_path)
+            if os.path.exists(abs_summary):
+                try:
+                    summary_data = parse_summary_file(abs_summary)
+                    safe_name = safe_filename(title)
+                    dst_summary_path = os.path.join(db.notes_dir, f"{safe_name}_summary.txt")
+                    os.makedirs(os.path.dirname(dst_summary_path), exist_ok=True)
+                    with open(abs_summary, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    with open(dst_summary_path, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                except Exception as e:
+                    pdf_warnings.append(f"处理摘要失败: {e}")
+            else:
+                pdf_warnings.append(f"摘要文件不存在: {summary_path}")
 
-        if tags:
-            for tag_name in tags.split(','):
+            if summary_data.get('title'):
+                title = summary_data['title']
+            if summary_data.get('authors') and not authors:
+                authors = summary_data['authors']
+            if summary_data.get('year') and not year:
+                year = summary_data['year']
+            if summary_data.get('venue') and not venue:
+                venue = summary_data['venue']
+
+        try:
+            if existing and args.force:
+                paper_id = existing['id']
+                db.update_paper(
+                    paper_id,
+                    title=title,
+                    authors=authors,
+                    year=year,
+                    venue=venue,
+                    file_path=dst_pdf_path,
+                    summary_path=dst_summary_path
+                )
+                status_label = "[UPD]"
+            else:
+                paper_id = db.add_paper(
+                    title=title,
+                    authors=authors,
+                    year=year,
+                    venue=venue,
+                    file_path=dst_pdf_path,
+                    summary_path=dst_summary_path
+                )
+                status_label = "[ OK ]"
+        except Exception as e:
+            msg = f"写入数据库失败: {e}"
+            fail_list.append({'line': idx, 'title': title, 'reason': msg})
+            print(f"[FAIL] 第{idx}行: {title}")
+            print(f"        原因: {msg}")
+            continue
+
+        tag_count = 0
+        if tags_str:
+            for tag_name in tags_str.split(','):
                 tag_name = tag_name.strip()
                 if tag_name:
-                    tag_id = db.add_tag(tag_name, 'topic')
-                    db.tag_paper(paper_id, tag_id)
+                    try:
+                        tag_id = db.add_tag(tag_name, 'topic')
+                        db.tag_paper(paper_id, tag_id)
+                        tag_count += 1
+                    except Exception:
+                        pass
 
-        imported.append({'id': paper_id, 'title': title})
-        print(f"导入: {title}")
+        if summary_data.get('summary'):
+            try:
+                db.add_note(paper_id, summary_data['summary'], 'summary')
+            except Exception:
+                pass
+        for quote in summary_data.get('quotes', []):
+            try:
+                db.add_quote(paper_id, quote)
+            except Exception:
+                pass
+        for question in summary_data.get('questions', []):
+            try:
+                db.add_question(paper_id, question)
+            except Exception:
+                pass
+        for note in summary_data.get('notes', []):
+            try:
+                db.add_note(paper_id, note, 'general')
+            except Exception:
+                pass
+
+        info = f"{status_label} 第{idx}行: [{paper_id}] {title}"
+        if authors:
+            info += f" - {authors}"
+        print(info)
+        if tag_count:
+            print(f"        标签: {tags_str} ({tag_count}个)")
+        if pdf_warnings:
+            for w in pdf_warnings:
+                print(f"        警告: {w}")
+
+        success_list.append({
+            'line': idx,
+            'id': paper_id,
+            'title': title,
+            'updated': (existing is not None and args.force)
+        })
 
     print()
-    print(f"完成: 成功导入 {len(imported)} 篇文献")
+    print("=" * 60)
+    print("批量导入汇总报告")
+    print("=" * 60)
+    total = len(lines)
+    ok = len(success_list)
+    skip = len(skip_list)
+    fail = len(fail_list)
+    print(f"总行数: {total}")
+    print(f"成功:   {ok}   ({ok/total*100:.1f}%)")
+    print(f"跳过:   {skip}   ({skip/total*100:.1f}%)")
+    print(f"失败:   {fail}   ({fail/total*100:.1f}%)")
+
+    if success_list:
+        updated_count = sum(1 for x in success_list if x['updated'])
+        new_count = ok - updated_count
+        print()
+        print(f"  新增: {new_count} 篇")
+        if updated_count:
+            print(f"  更新: {updated_count} 篇")
+
+    if skip_list:
+        print()
+        print("跳过详情:")
+        for s in skip_list:
+            print(f"  第{s['line']}行 - {s['title']}")
+            print(f"    原因: {s['reason']}")
+
+    if fail_list:
+        print()
+        print("失败详情:")
+        for f in fail_list:
+            title = f.get('title', f"原始行: {f.get('raw','')[:50]}")
+            print(f"  第{f['line']}行 - {title}")
+            print(f"    原因: {f['reason']}")
+            fail_count = fail
+
+    print()
+    if fail > 0:
+        print("提示: 修正失败条目后，使用 -f 重新运行可更新已存在的记录")
+    elif skip > 0:
+        print("提示: 使用 -f 参数可强制更新被跳过的已存在记录")
 
 
 def register_import(subparsers: argparse._SubParsersAction) -> None:
@@ -292,7 +491,7 @@ def register_import(subparsers: argparse._SubParsersAction) -> None:
     )
     group.add_argument(
         '-b', '--batch',
-        help='从文件或标准输入批量导入（格式：标题|PDF路径|作者|年份|会议|标签）'
+        help='批量导入（文件路径或 stdin，格式：标题|PDF路径|作者|年份|会议|标签(,分隔)|摘要文件路径；#开头的行忽略）'
     )
 
     parser.add_argument(

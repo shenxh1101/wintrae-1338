@@ -1,4 +1,5 @@
 import os
+import shutil
 import sqlite3
 import json
 from datetime import datetime
@@ -130,6 +131,21 @@ class Database:
         conn.commit()
         conn.close()
 
+    def reset(self, keep_papers: bool = False, keep_notes: bool = False) -> None:
+        self.close()
+
+        db_dir = os.path.dirname(self.db_path)
+        if os.path.exists(db_dir):
+            shutil.rmtree(db_dir)
+
+        if not keep_papers and os.path.exists(self.papers_dir):
+            shutil.rmtree(self.papers_dir)
+
+        if not keep_notes and os.path.exists(self.notes_dir):
+            shutil.rmtree(self.notes_dir)
+
+        self.initialize()
+
     def add_paper(self, title: str, authors: Optional[str] = None,
                   year: Optional[int] = None, venue: Optional[str] = None,
                   file_path: Optional[str] = None, summary_path: Optional[str] = None) -> int:
@@ -176,14 +192,13 @@ class Database:
         self.conn.commit()
 
     def add_tag(self, name: str, category: str, color: str = '#3b82f6') -> int:
+        existing = self.conn.execute('SELECT id FROM tags WHERE name = ?', (name,)).fetchone()
+        if existing:
+            return existing['id']
         cursor = self.conn.execute('''
-            INSERT OR IGNORE INTO tags (name, category, color)
+            INSERT INTO tags (name, category, color)
             VALUES (?, ?, ?)
         ''', (name, category, color))
-        if cursor.lastrowid == 0:
-            cursor = self.conn.execute('SELECT id FROM tags WHERE name = ?', (name,))
-            row = cursor.fetchone()
-            return row['id']
         self.conn.commit()
         return cursor.lastrowid
 
